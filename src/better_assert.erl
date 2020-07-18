@@ -2,7 +2,7 @@
 
 -export([assert/2, refute/2, match/1, equal/2, parse_transform/2]).
 
--define(call(A, M, F, As), 
+-define(call(A, M, F, As),
     {call, A, {remote, A, {atom, A, M}, {atom, A, F}}, As}
 ).
 
@@ -30,24 +30,61 @@ match(Value) -> Value.
 
 equal(Left, Right) -> Left =:= Right.
 
-parse_transform(Forms0, _Options) ->
+parse_transform(Forms, _Options) ->
     put(gen_sym, 0),
-    try ba_map_call_transform:transform(Forms0, {better_assert, '$marker', 2}, fun process_call/1)
+    try [transform_form(Form) || Form <- Forms]
     after erase(gen_sym)
     end.
 
-process_call({call, Anno0, _, [{atom, _, Kind}, Expr]}) ->
-    Anno = erl_anno:set_generated(true, Anno0),
-    process_assertion(Anno, Kind, Expr).
+transform_form(Form) ->
+    case erl_syntax:type(Form) of
+        function ->
+            Annotated = erl_syntax_lib:annotate_bindings(Form, ordsets:new()),
+            erl_syntax:revert(erl_syntax_lib:map(fun transform_expr/1, Annotated));
+        _ ->
+            Form
+    end.
 
-process_assertion(Anno, Kind, {op, _, _, _, _} = Expr) ->
-    process_operator(Anno, Kind, Expr);
-process_assertion(Anno, Kind, {match, _MAnno,  Pattern, Expr}) ->
-    process_match(Anno, Kind, Expr, Pattern, []);
-process_assertion(Anno, Kind, ?call(_, ?MODULE, match, [Case])) ->
-    {'case', _, Expr, [{clause, _, [Pattern], Guards, [_]}, _]} = Case,
-    process_match(Anno, Kind, Expr, Pattern, Guards);
-process_assertion(Anno, Kind, Expr) ->
+transform_expr(Expr) ->
+    try erl_syntax_lib:analyze_application(Expr) of
+        {?MODULE, {'$marker', 2}} ->
+            process_assertion(erl_syntax:get_pos(Expr), erl_syntax:application_arguments(Expr));
+        _ -> Expr
+    catch
+        syntax_error -> Expr
+    end.
+
+process_assertion(Anno0, [Atom, Expr]) ->
+    Anno = erl_anno:set_generated(true, Anno0),
+    Kind = erl_syntax:atom_value(Atom),
+    case erl_syntax:type(Expr) of
+        infix_expr ->
+            Op = erl_syntax:operator_name(erl_syntax:infix_expr_operator(Expr)),
+            OpAnno = erl_syntax:get_pos(Expr),
+            Left = erl_syntax:infix_expr_left(Expr),
+            Right = erl_syntax:infix_expr_right(Expr),
+            process_operator(Anno, Kind, Op, OpAnno, Left, Right, Expr);
+        match_expr ->
+            Body = erl_syntax:match_expr_body(Expr),
+            Pattern = erl_syntax:match_expr_pattern(Expr),
+            process_match(Anno, Kind, Body, Pattern, []);
+        application ->
+            case erl_syntax_lib:analyze_application(Expr) of
+                {?MODULE, {match, 1}} ->
+                    [Case] = erl_syntax:application_arguments(Expr),
+                    Body = erl_syntax:case_expr_argument(Case),
+                    [Clause] = erl_syntax:case_expr_clauses(Case),
+                    Guards = erl_syntax:clause_guard(Clause),
+                    [Pattern] = erl_synax:clause_patterns(Clause),
+                    process_match(Anno, Kind, Body, Pattern, Guards);
+                _ ->
+                    process_other(Anno, Kind, Expr)
+            end;
+        _ ->
+            process_other(Anno, Kind, Expr)
+    end.
+
+process_other(Anno, Kind, Expr) ->
     Value = gen_var(Anno, value),
 
     ErrorInfo = {map, Anno, [
@@ -57,30 +94,36 @@ process_assertion(Anno, Kind, Expr) ->
     ]},
 
     {block, Anno, [
-        {match, Anno, Value, Expr},
+        {match, Anno, Value, erl_syntax:revert(Expr)},
         ?call(Anno, ?MODULE, Kind, [Value, ErrorInfo])
     ]}.
 
 process_match(Anno, Kind, Expr, Pattern0, Guards0) ->
     Value = gen_var(Anno, value),
-    {Pattern, VarSubs} = extract_pattern_vars(Pattern0, #{}),
-    Guards = rewrite_guards(Guards, VarSubs),
-    TmpVars = [{var, Anno, Var} || Var <- map:values(VarSubs)],
-    Vars = [{var, Anno, Var} || Var <- map:keys(VarSubs)],
+    Attrs = erl_syntax:get_ann(Pattern0),
+    {free, Pins} = lists:keyfind(free, 1, Attrs),
 
     ErrorInfo = {map, Anno, [
         ?key(Anno, value, Value),
-        ?key(Anno, expr, ?string(Anno, print_match(Kind, Expr, Pattern, Guards))),
-        ?key(Anno, pattern, erl_parse:abstract(Pattern)),
-        ?key(Anno, guards, erl_parse:abstract(Guards)),
+        ?key(Anno, pins, {map, Anno, [?key(Anno, Name, {var, Anno, Name}) || Name <- Pins]}),
+        ?key(Anno, expr, ?string(Anno, print_match(Kind, Expr, Pattern0, Guards0))),
+        ?key(Anno, pattern, erl_parse:abstract(erl_syntax:revert(Pattern0))),
+        ?key(Anno, guards, erl_parse:abstract(erl_syntax:revert(Guards0))),
         ?key(Anno, message, ?string(Anno, message(Kind, match)))
     ]},
 
     {block, Anno, [
-        {match, Anno, Value, Expr},
-        case Kind of    
+        {match, Anno, Value, erl_syntax:revert(Expr)},
+        case Kind of
             assert ->
-                {match, Anno, {tuple, Anno, Vars}, 
+                {bound, Bound} = lists:keyfind(bound, 1, Attrs),
+                BoundVars = [{var, Anno, Name} || Name <- Bound],
+                TmpVars = [gen_var(Anno, tmp) || _ <- Bound],
+                Subs = maps:from_list(lists:zip(Bound, TmpVars)),
+                Pattern = rewrite_vars(Pattern0, Subs),
+                Guards = rewrite_vars(Guards0, Subs),
+
+                {match, Anno, {tuple, Anno, BoundVars},
                     {'case', Anno, Value, [
                         {clause, Anno, [Pattern], Guards, [{tuple, Anno, TmpVars}]},
                         {clause, Anno, [{var, Anno, '_'}], [], [
@@ -89,7 +132,7 @@ process_match(Anno, Kind, Expr, Pattern0, Guards0) ->
                     ]}};
             refute ->
                 {'case', Anno, Value, [
-                    {clause, Anno, [Pattern], Guards, [
+                    {clause, Anno, [Pattern0], Guards0, [
                         ?call(Anno, ?MODULE, refute, [{atom, Anno, true}, ErrorInfo])
                     ]},
                     {clause, Anno, [{var, Anno, '_'}], [], [Value]}
@@ -97,7 +140,18 @@ process_match(Anno, Kind, Expr, Pattern0, Guards0) ->
         end
     ]}.
 
-process_operator(Anno, Kind, {op, OpAnno, Op, LeftExpr, RightExpr} = Expr) ->
+rewrite_vars([], _Subs) ->
+    [];
+rewrite_vars(Tree, Subs) ->
+    Rewrite = fun (Expr) ->
+        case erl_syntax:type(Expr) of
+            variable -> maps:get(erl_syntax:variable_name(Expr), Subs, Expr);
+            _ -> Expr
+        end
+    end,
+    erl_syntax:revert(erl_syntax_lib:map(Rewrite, Tree)).
+
+process_operator(Anno, Kind, Op, OpAnno, LeftExpr, RightExpr, Expr) ->
     Left = gen_var(Anno, left),
     Right = gen_var(Anno, right),
     Call = {op, OpAnno, Op, Left, Right},
@@ -112,8 +166,8 @@ process_operator(Anno, Kind, {op, OpAnno, Op, LeftExpr, RightExpr} = Expr) ->
     ]},
 
     {block, Anno, [
-        {match, Anno, Left, LeftExpr},
-        {match, Anno, Right, RightExpr},
+        {match, Anno, Left, erl_syntax:revert(LeftExpr)},
+        {match, Anno, Right, erl_syntax:revert(RightExpr)},
         case include_equality_check(Kind, Op) of
             true ->
                 EqMessage = ?string(Anno, [Message, ", both sides are exactly equal"]),
