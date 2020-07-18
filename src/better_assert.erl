@@ -1,6 +1,6 @@
 -module(better_assert).
 
--export([assert/2, refute/2, match/1, equal/2, parse_transform/2]).
+-export([assert/2, refute/2, match/1, equal/2, parse_transform/2, format_error/1]).
 
 -define(call(A, M, F, As),
     {call, A, {remote, A, {atom, A, M}, {atom, A, F}}, As}
@@ -10,16 +10,12 @@
 
 -define(string(A, Expr), {string, A, unicode:characters_to_list(Expr)}).
 
-assert(Value, Message) when is_list(Message) ->
-    assert(Value, #{message => Message});
 assert(Value, Details) when is_map(Details) ->
     case Value of
         true -> true;
         _ -> error({badassert, Details})
     end.
 
-refute(Value, Message) when is_list(Message) ->
-    refute(Value, #{message => Message});
 refute(Value, Details) when is_map(Details) ->
     case Value of
         false -> false;
@@ -36,11 +32,17 @@ parse_transform(Forms, _Options) ->
     after erase(gen_sym)
     end.
 
+format_error({assert_match, Expr}) ->
+    "invalid expression for ?assertMatch: " ++ erl_prettypr:format(Expr).
+
 transform_form(Form) ->
     case erl_syntax:type(Form) of
         function ->
             Annotated = erl_syntax_lib:annotate_bindings(Form, ordsets:new()),
-            erl_syntax:revert(erl_syntax_lib:map(fun transform_expr/1, Annotated));
+            try erl_syntax:revert(erl_syntax_lib:map(fun transform_expr/1, Annotated))
+            catch
+                {error_marker, Line, Reason} -> {error, {erl_anno:location(Line), ?MODULE, Reason}}
+            end;
         _ ->
             Form
     end.
@@ -49,6 +51,8 @@ transform_expr(Expr) ->
     try erl_syntax_lib:analyze_application(Expr) of
         {?MODULE, {'$marker', 2}} ->
             process_assertion(erl_syntax:get_pos(Expr), erl_syntax:application_arguments(Expr));
+        {?MODULE, {'$marker_match', 2}} ->
+            process_match_assertion(erl_syntax:get_pos(Expr), erl_syntax:application_arguments(Expr));
         _ -> Expr
     catch
         syntax_error -> Expr
@@ -64,24 +68,27 @@ process_assertion(Anno0, [Atom, Expr]) ->
             Left = erl_syntax:infix_expr_left(Expr),
             Right = erl_syntax:infix_expr_right(Expr),
             process_operator(Anno, Kind, Op, OpAnno, Left, Right, Expr);
+        _ ->
+            process_other(Anno, Kind, Expr)
+    end.
+
+process_match_assertion(Anno0, [Atom, Expr]) ->
+    Anno = erl_anno:set_generated(true, Anno0),
+    Kind = erl_syntax:atom_value(Atom),
+    case erl_syntax:type(Expr) of
         match_expr ->
             Body = erl_syntax:match_expr_body(Expr),
             Pattern = erl_syntax:match_expr_pattern(Expr),
             process_match(Anno, Kind, Body, Pattern, []);
-        application ->
-            case erl_syntax_lib:analyze_application(Expr) of
-                {?MODULE, {match, 1}} ->
-                    [Case] = erl_syntax:application_arguments(Expr),
-                    Body = erl_syntax:case_expr_argument(Case),
-                    [Clause] = erl_syntax:case_expr_clauses(Case),
-                    Guards = erl_syntax:clause_guard(Clause),
-                    [Pattern] = erl_synax:clause_patterns(Clause),
-                    process_match(Anno, Kind, Body, Pattern, Guards);
-                _ ->
-                    process_other(Anno, Kind, Expr)
-            end;
+        case_expr ->
+            [Case] = erl_syntax:application_arguments(Expr),
+            Body = erl_syntax:case_expr_argument(Case),
+            [Clause] = erl_syntax:case_expr_clauses(Case),
+            Guards = erl_syntax:clause_guard(Clause),
+            [Pattern] = erl_synax:clause_patterns(Clause),
+            process_match(Anno, Kind, Body, Pattern, Guards);
         _ ->
-            process_other(Anno, Kind, Expr)
+            throw({error_marker, Anno, {assert_match, Expr}})
     end.
 
 process_other(Anno, Kind, Expr) ->

@@ -6,15 +6,29 @@
 -define(assert(Expr), better_assert:'$marker'(assert, Expr)).
 -define(assert(Expr, Message), better_assert:assert(Expr, #{message => Message})).
 -define(refute(Expr), better_assert:'$marker'(refute, Expr)).
--define(refute(Expr, Message), not better_assert:assert(not (Expr), #{message => Message})).
+-define(refute(Expr, Message), better_assert:refute(Expr, #{message => Message})).
 
--define(match(Guard, Value),
-    better_assert:match(
+-define(assertMatch(Expr), better_assert:'$marker_match'(assert, Expr)).
+-define(refuteMatch(Expr), better_assert:'$marker_match'(refute, Expr)).
+
+-define(assertMatch(Pattern, Value),
+    better_assert:'$marker_match'(
+        assert,
         case (Value) of
-            Guard -> true;
-            _ -> false
+            Guard -> true
         end
     )
 ).
+
+
+-define(refuteMatch(Pattern, Value),
+    better_assert:'$marker_match'(
+        refute,
+        case (Value) of
+            Guard -> false
+        end
+    )
+).
+
 
 -endif.
