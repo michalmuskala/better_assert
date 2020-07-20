@@ -15,7 +15,17 @@
     better_assert:'$marker_match'(
         assert,
         case (Value) of
-            Guard -> true
+            Pattern -> true
+        end
+    )
+).
+
+-define(assertMatch(Pattern, Value, Message),
+    better_assert:'$marker_match'(
+        assert,
+        Message,
+        case (Value) of
+            Pattern -> true
         end
     )
 ).
@@ -30,5 +40,124 @@
     )
 ).
 
+-define(refuteMatch(Pattern, Value, Message),
+    better_assert:'$marker_match'(
+        refute,
+        Message
+        case (Value) of
+            Guard -> false
+        end
+    )
+).
+
+-define(assertReceive(Pattern),
+    better_assert:'$marker_receive'(
+        assert,
+        default,
+        default,
+        receive
+            Pattern -> true
+        end
+    )
+).
+
+-define(assertReceive(Pattern, Timeout),
+    better_assert:'$marker_receive'(
+        assert,
+        Timeout,
+        default,
+        receive
+            Pattern -> true
+        end
+    )
+).
+
+-define(assertReceive(Pattern, Timeout, Message),
+    better_assert:'$marker_receive'(
+        assert,
+        Timeout,
+        Message,
+        receive
+            Pattern -> true
+        end
+    )
+).
+
+-define(assertReceived(Pattern),
+    better_assert:'$marker_receive'(
+        assert,
+        0,
+        default
+        receive
+            Pattern -> true
+        end
+    )
+).
+
+-define(assertReceived(Pattern, Message),
+    better_assert:'$marker_receive'(
+        assert,
+        0,
+        Message
+        receive
+            Pattern -> true
+        end
+    )
+).
+
+-define(refuteReceive(Pattern),
+    better_assert:'$marker_receive'(
+        refute,
+        default,
+        default,
+        receive
+            Pattern -> false
+        end
+    )
+).
+
+-define(refuteReceive(Pattern, Timeout),
+    better_assert:'$marker_receive'(
+        refute,
+        Timeout,
+        default,
+        receive
+            Pattern -> false
+        end
+    )
+).
+
+-define(refuteReceive(Pattern, Timeout, Message),
+    better_assert:'$marker_receive'(
+        refute,
+        Timeout,
+        Message,
+        receive
+            Pattern -> false
+        end
+    )
+).
+
+-define(refuteReceived(Pattern),
+    better_assert:'$marker_receive'(
+        refute,
+        0,
+        default
+        receive
+            Pattern -> false
+        end
+    )
+).
+
+-define(refuteReceived(Pattern, Message),
+    better_assert:'$marker_receive'(
+        refute,
+        0,
+        Message
+        receive
+            Pattern -> false
+        end
+    )
+).
 
 -endif.

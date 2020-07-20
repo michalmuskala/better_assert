@@ -51,8 +51,10 @@ transform_expr(Expr) ->
     try erl_syntax_lib:analyze_application(Expr) of
         {?MODULE, {'$marker', 2}} ->
             process_assertion(erl_syntax:get_pos(Expr), erl_syntax:application_arguments(Expr));
-        {?MODULE, {'$marker_match', 2}} ->
+        {?MODULE, {'$marker_match', A}} when A =:=2; A =:= 3 ->
             process_match_assertion(erl_syntax:get_pos(Expr), erl_syntax:application_arguments(Expr));
+        {?MODULE, {'$marker_receive', 2}} ->
+            process_receive_assertion(erl_syntax:get_pos(Expr), erl_syntax:application_arguments(Expr));
         _ -> Expr
     catch
         syntax_error -> Expr
@@ -75,21 +77,35 @@ process_assertion(Anno0, [Atom, Expr]) ->
 process_match_assertion(Anno0, [Atom, Expr]) ->
     Anno = erl_anno:set_generated(true, Anno0),
     Kind = erl_syntax:atom_value(Atom),
+    process_match_assertion(Anno, Kind, Expr, default);
+process_match_assertion(Anno0, [Atom, Message, Expr]) ->
+    Anno = erl_anno:set_generated(true, Anno0),
+    Kind = erl_syntax:atom_value(Atom),
+    process_match_assertion(Anno, Kind, Expr, {custom, Message}).
+
+process_match_assertion(Anno, Kind, Expr, Message) ->
     case erl_syntax:type(Expr) of
         match_expr ->
             Body = erl_syntax:match_expr_body(Expr),
             Pattern = erl_syntax:match_expr_pattern(Expr),
-            process_match(Anno, Kind, Body, Pattern, []);
+            process_match(Anno, Kind, Body, Pattern, none, Message);
         case_expr ->
-            [Case] = erl_syntax:application_arguments(Expr),
-            Body = erl_syntax:case_expr_argument(Case),
-            [Clause] = erl_syntax:case_expr_clauses(Case),
+            Body = erl_syntax:case_expr_argument(Expr),
+            [Clause] = erl_syntax:case_expr_clauses(Expr),
             Guards = erl_syntax:clause_guard(Clause),
-            [Pattern] = erl_synax:clause_patterns(Clause),
-            process_match(Anno, Kind, Body, Pattern, Guards);
+            [Pattern] = erl_syntax:clause_patterns(Clause),
+            process_match(Anno, Kind, Body, Pattern, Guards, Message);
         _ ->
             throw({error_marker, Anno, {assert_match, Expr}})
     end.
+
+process_receive_assertion(Anno0, [Atom, Timeout, Message, Receive]) ->
+    {todo, Anno0, Atom, Timeout, Message, Receive}.
+    % Anno = erl_anno:set_generated(true, Anno0),
+    % Kind = erl_syntax:atom_value(Atom),
+    % [Clause] = erl_syntax:receive_expr_clauses(Receive),
+    % Guards = erl_syntax:clause_guard(Clause),
+    % [Pattern] = erl_syntax:clause_patterns(Clause)
 
 process_other(Anno, Kind, Expr) ->
     Value = gen_var(Anno, value),
@@ -105,19 +121,27 @@ process_other(Anno, Kind, Expr) ->
         ?call(Anno, ?MODULE, Kind, [Value, ErrorInfo])
     ]}.
 
-process_match(Anno, Kind, Expr, Pattern0, Guards0) ->
+process_match(Anno, Kind, Expr, Pattern0, Guards0, Message) ->
     Value = gen_var(Anno, value),
     Attrs = erl_syntax:get_ann(Pattern0),
     {free, Pins} = lists:keyfind(free, 1, Attrs),
 
-    ErrorInfo = {map, Anno, [
-        ?key(Anno, value, Value),
-        ?key(Anno, pins, {map, Anno, [?key(Anno, Name, {var, Anno, Name}) || Name <- Pins]}),
-        ?key(Anno, expr, ?string(Anno, print_match(Kind, Expr, Pattern0, Guards0))),
-        ?key(Anno, pattern, erl_parse:abstract(erl_syntax:revert(Pattern0))),
-        ?key(Anno, guards, erl_parse:abstract(erl_syntax:revert(Guards0))),
-        ?key(Anno, message, ?string(Anno, message(Kind, match)))
-    ]},
+    ErrorInfo =
+        case Message of
+            default ->
+                {map, Anno, [
+                    ?key(Anno, value, Value),
+                    ?key(Anno, pins, {map, Anno, [?key(Anno, Name, {var, Anno, Name}) || Name <- Pins]}),
+                    ?key(Anno, expr, ?string(Anno, print_match(Kind, Expr, Pattern0, Guards0))),
+                    ?key(Anno, pattern, erl_parse:abstract(erl_syntax:revert(Pattern0))),
+                    ?key(Anno, guards, erl_parse:abstract(revert(Guards0))),
+                    ?key(Anno, message, ?string(Anno, message(Kind, match)))
+                ]};
+            {custom, Custom} ->
+                {map, Anno, [
+                    ?key(Anno, message, erl_syntax:revert(Custom))
+                ]}
+        end,
 
     {block, Anno, [
         {match, Anno, Value, erl_syntax:revert(Expr)},
@@ -139,7 +163,7 @@ process_match(Anno, Kind, Expr, Pattern0, Guards0) ->
                     ]}};
             refute ->
                 {'case', Anno, Value, [
-                    {clause, Anno, [Pattern0], Guards0, [
+                    {clause, Anno, [erl_syntax:revert(Pattern0)], revert(Guards0), [
                         ?call(Anno, ?MODULE, refute, [{atom, Anno, true}, ErrorInfo])
                     ]},
                     {clause, Anno, [{var, Anno, '_'}], [], [Value]}
@@ -147,7 +171,7 @@ process_match(Anno, Kind, Expr, Pattern0, Guards0) ->
         end
     ]}.
 
-rewrite_vars([], _Subs) ->
+rewrite_vars(none, _Subs) ->
     [];
 rewrite_vars(Tree, Subs) ->
     Rewrite = fun (Expr) ->
@@ -156,7 +180,17 @@ rewrite_vars(Tree, Subs) ->
             _ -> Expr
         end
     end,
-    erl_syntax:revert(erl_syntax_lib:map(Rewrite, Tree)).
+    revert(erl_syntax_lib:map(Rewrite, Tree)).
+
+%% erl_syntax:revert/1 does not revert "guard" nodes, need to do that manually
+revert(Expr) ->
+    Reverted = erl_syntax:revert(Expr),
+    case erl_syntax:is_tree(Reverted) of
+        true ->
+            [erl_syntax:conjunction_body(Node) || Node <- erl_syntax:disjunction_body(Reverted)];
+        false ->
+            Reverted
+    end.
 
 process_operator(Anno, Kind, Op, OpAnno, LeftExpr, RightExpr, Expr) ->
     Left = gen_var(Anno, left),
@@ -212,11 +246,10 @@ include_equality_check(refute, Op) ->
 print_code(Kind, Expr) ->
     ["?", atom_to_list(Kind), "(", erl_prettypr:format(Expr) ,")"].
 
-print_match(Kind, Expr, Pattern, []) ->
-    ["?", atom_to_list(Kind), "(", erl_prettypr:format(Pattern), " = ", erl_prettypr:format(Expr), ")"];
+print_match(Kind, Expr, Pattern, none) ->
+    ["?", atom_to_list(Kind), "Match(", erl_prettypr:format(Pattern), " = ", erl_prettypr:format(Expr), ")"];
 print_match(Kind, Expr, Pattern, Guards) ->
-    GuardsTree = erl_syntax:disjunction([erl_syntax:conjunction(Exprs) || Exprs <- Guards]),
-    ["?", atom_to_list(Kind), "(?match(", erl_prettypr:format(Pattern), " when ", erl_prettypr:format(GuardsTree), ", ", erl_prettypr:format(Expr), "))"].
+    ["?", atom_to_list(Kind), "Match(", erl_prettypr:format(Pattern), " when ", erl_prettypr:format(Guards), ", ", erl_prettypr:format(Expr), ")"].
 
 gen_var(Anno, Name) ->
     Num = get(gen_sym),
