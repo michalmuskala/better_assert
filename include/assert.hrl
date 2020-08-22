@@ -53,8 +53,6 @@
 -define(assertReceive(Pattern),
     better_assert:'$marker_receive'(
         assert,
-        default,
-        default,
         receive
             Pattern -> true
         end
@@ -64,10 +62,9 @@
 -define(assertReceive(Pattern, Timeout),
     better_assert:'$marker_receive'(
         assert,
-        Timeout,
-        default,
         receive
             Pattern -> true
+        after Timeout -> false
         end
     )
 ).
@@ -75,10 +72,10 @@
 -define(assertReceive(Pattern, Timeout, Message),
     better_assert:'$marker_receive'(
         assert,
-        Timeout,
         Message,
         receive
             Pattern -> true
+        after Timeout -> false
         end
     )
 ).
@@ -86,10 +83,9 @@
 -define(assertReceived(Pattern),
     better_assert:'$marker_receive'(
         assert,
-        0,
-        default
         receive
             Pattern -> true
+        after 0 -> false
         end
     )
 ).
@@ -97,10 +93,10 @@
 -define(assertReceived(Pattern, Message),
     better_assert:'$marker_receive'(
         assert,
-        0,
         Message
         receive
             Pattern -> true
+        after 0 -> false
         end
     )
 ).
@@ -108,8 +104,6 @@
 -define(refuteReceive(Pattern),
     better_assert:'$marker_receive'(
         refute,
-        default,
-        default,
         receive
             Pattern -> false
         end
@@ -119,10 +113,9 @@
 -define(refuteReceive(Pattern, Timeout),
     better_assert:'$marker_receive'(
         refute,
-        Timeout,
-        default,
         receive
             Pattern -> false
+        after Timeout -> true
         end
     )
 ).
@@ -130,10 +123,10 @@
 -define(refuteReceive(Pattern, Timeout, Message),
     better_assert:'$marker_receive'(
         refute,
-        Timeout,
         Message,
         receive
             Pattern -> false
+        after Timeout -> true
         end
     )
 ).
@@ -141,10 +134,9 @@
 -define(refuteReceived(Pattern),
     better_assert:'$marker_receive'(
         refute,
-        0,
-        default
         receive
             Pattern -> false
+        after 0 -> true
         end
     )
 ).
@@ -152,10 +144,10 @@
 -define(refuteReceived(Pattern, Message),
     better_assert:'$marker_receive'(
         refute,
-        0,
         Message
         receive
             Pattern -> false
+        after 0 -> true
         end
     )
 ).

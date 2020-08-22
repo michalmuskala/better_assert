@@ -51,9 +51,9 @@ transform_expr(Expr) ->
     try erl_syntax_lib:analyze_application(Expr) of
         {?MODULE, {'$marker', 2}} ->
             process_assertion(erl_syntax:get_pos(Expr), erl_syntax:application_arguments(Expr));
-        {?MODULE, {'$marker_match', A}} when A =:=2; A =:= 3 ->
+        {?MODULE, {'$marker_match', A}} when A =:= 2; A =:= 3 ->
             process_match_assertion(erl_syntax:get_pos(Expr), erl_syntax:application_arguments(Expr));
-        {?MODULE, {'$marker_receive', 2}} ->
+        {?MODULE, {'$marker_receive', A}} when A =:= 2; A =:= 3 ->
             process_receive_assertion(erl_syntax:get_pos(Expr), erl_syntax:application_arguments(Expr));
         _ -> Expr
     catch
@@ -99,13 +99,14 @@ process_match_assertion(Anno, Kind, Expr, Message) ->
             throw({error_marker, Anno, {assert_match, Expr}})
     end.
 
-process_receive_assertion(Anno0, [Atom, Timeout, Message, Receive]) ->
-    {todo, Anno0, Atom, Timeout, Message, Receive}.
-    % Anno = erl_anno:set_generated(true, Anno0),
-    % Kind = erl_syntax:atom_value(Atom),
-    % [Clause] = erl_syntax:receive_expr_clauses(Receive),
-    % Guards = erl_syntax:clause_guard(Clause),
-    % [Pattern] = erl_syntax:clause_patterns(Clause)
+process_receive_assertion(Anno0, [Atom, Receive]) ->
+    Anno = erl_anno:set_generated(true, Anno0),
+    Kind = erl_syntax:atom_value(Atom),
+    proces_receive(Anno, Kind, Receive, default);
+process_receive_assertion(Anno0, [Atom, Message, Receive]) ->
+    Anno = erl_anno:set_generated(true, Anno0),
+    Kind = erl_syntax:atom_value(Atom),
+    process_receive(Anno, Kind, Receive, {custom, Message}).
 
 process_other(Anno, Kind, Expr) ->
     Value = gen_var(Anno, value),
@@ -192,6 +193,35 @@ revert(Expr) ->
             Reverted
     end.
 
+process_receive(Anno, Kind, Receive, Message) ->
+    Value = gen_var(Anno, value),
+    Attrs = erl_syntax:get_ann(Pattern0),
+    {free, Pins} = lists:keyfind(free, 1, Attrs),
+
+    Timeout = receive_default_timeout(Receive),
+    [Clause] = erl_syntax:receive_expr_clauses(Receive),
+    Guards = erl_syntax:clause_guard(Clause),
+    [Pattern] = erl_syntax:clause_patterns(Clause),
+
+    ErrorInfo =
+        case Message of
+            default ->
+                {map, Anno, [
+                    ?key(Anno, value, Value),
+                    ?key(Anno, pins, {map, Anno, [?key(Anno, Name, {var, Anno, Name}) || Name <- Pins]}),
+                    ?key(Anno, expr, ?string(Anno, print_match(Kind, Expr, Pattern0, Guards0))),
+                    ?key(Anno, pattern, erl_parse:abstract(erl_syntax:revert(Pattern0))),
+                    ?key(Anno, guards, erl_parse:abstract(revert(Guards0))),
+                    ?key(Anno, message, ?string(Anno, message(Kind, match)))
+                ]};
+            {custom, Custom} ->
+                {map, Anno, [
+                    ?key(Anno, message, erl_syntax:revert(Custom))
+                ]}
+        end,
+
+
+
 process_operator(Anno, Kind, Op, OpAnno, LeftExpr, RightExpr, Expr) ->
     Left = gen_var(Anno, left),
     Right = gen_var(Anno, right),
@@ -237,6 +267,12 @@ message(assert, match) -> "Match failed";
 message(refute, match) -> "Match succeeded, but should have failed";
 message(assert, _Expr) -> "Assertion failed";
 message(refute, _Expr) -> "Refute failed".
+
+receive_default_timeout(Receive) ->
+    case erl_syntax:receive_expr_timeout(Receive) of
+        none -> erl_syntax:abstract(application:get_env(better_assert, default_timeout));
+        Other -> Other
+    end.
 
 include_equality_check(assert, Op) ->
     lists:member(Op, ['>', '>', '=/=', '/=']);
