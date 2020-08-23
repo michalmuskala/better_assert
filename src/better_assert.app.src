@@ -4,7 +4,7 @@
     {registered, []},
     {applications, [kernel, stdlib]},
     {env,[
-        {default_timeout, 5000}
+        {receive_timeout, 5000}
     ]},
     {modules, []},
     {licenses, ["Apache 2.0"]},

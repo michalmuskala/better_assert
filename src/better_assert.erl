@@ -102,7 +102,7 @@ process_match_assertion(Anno, Kind, Expr, Message) ->
 process_receive_assertion(Anno0, [Atom, Receive]) ->
     Anno = erl_anno:set_generated(true, Anno0),
     Kind = erl_syntax:atom_value(Atom),
-    proces_receive(Anno, Kind, Receive, default);
+    process_receive(Anno, Kind, Receive, default);
 process_receive_assertion(Anno0, [Atom, Message, Receive]) ->
     Anno = erl_anno:set_generated(true, Anno0),
     Kind = erl_syntax:atom_value(Atom),
@@ -113,7 +113,7 @@ process_other(Anno, Kind, Expr) ->
 
     ErrorInfo = {map, Anno, [
         ?key(Anno, value, Value),
-        ?key(Anno, expr, ?string(Anno, print_code(Kind, Expr))),
+        ?key(Anno, expr, ?string(Anno, print_assert(Kind, Expr))),
         ?key(Anno, message, ?string(Anno, message(Kind, Expr)))
     ]},
 
@@ -155,6 +155,7 @@ process_match(Anno, Kind, Expr, Pattern0, Guards0, Message) ->
                 Pattern = rewrite_vars(Pattern0, Subs),
                 Guards = rewrite_vars(Guards0, Subs),
 
+                % TODO: make whole expression evaluate to matched value
                 {match, Anno, {tuple, Anno, BoundVars},
                     {'case', Anno, Value, [
                         {clause, Anno, [Pattern], Guards, [{tuple, Anno, TmpVars}]},
@@ -184,6 +185,8 @@ rewrite_vars(Tree, Subs) ->
     revert(erl_syntax_lib:map(Rewrite, Tree)).
 
 %% erl_syntax:revert/1 does not revert "guard" nodes, need to do that manually
+revert(none) ->
+    [];
 revert(Expr) ->
     Reverted = erl_syntax:revert(Expr),
     case erl_syntax:is_tree(Reverted) of
@@ -194,25 +197,27 @@ revert(Expr) ->
     end.
 
 process_receive(Anno, Kind, Receive, Message) ->
-    Value = gen_var(Anno, value),
+    TimeoutVar = gen_var(Anno, timeout),
+
+    Timeout0 = erl_syntax:revert(erl_syntax:receive_expr_timeout(Receive)),
+    TimeoutExpr = receive_default_timeout(Anno, Timeout0),
+    [Clause] = erl_syntax:receive_expr_clauses(Receive),
+    Guards0 = erl_syntax:clause_guard(Clause),
+    [Pattern0] = erl_syntax:clause_patterns(Clause),
+
     Attrs = erl_syntax:get_ann(Pattern0),
     {free, Pins} = lists:keyfind(free, 1, Attrs),
-
-    Timeout = receive_default_timeout(Receive),
-    [Clause] = erl_syntax:receive_expr_clauses(Receive),
-    Guards = erl_syntax:clause_guard(Clause),
-    [Pattern] = erl_syntax:clause_patterns(Clause),
 
     ErrorInfo =
         case Message of
             default ->
                 {map, Anno, [
-                    ?key(Anno, value, Value),
                     ?key(Anno, pins, {map, Anno, [?key(Anno, Name, {var, Anno, Name}) || Name <- Pins]}),
-                    ?key(Anno, expr, ?string(Anno, print_match(Kind, Expr, Pattern0, Guards0))),
+                    ?key(Anno, expr, ?string(Anno, print_receive(Kind, Pattern0, Guards0, Timeout0))),
                     ?key(Anno, pattern, erl_parse:abstract(erl_syntax:revert(Pattern0))),
                     ?key(Anno, guards, erl_parse:abstract(revert(Guards0))),
-                    ?key(Anno, message, ?string(Anno, message(Kind, match)))
+                    ?key(Anno, timeout, TimeoutVar),
+                    ?key(Anno, message, ?string(Anno, message(Kind, 'receive')))
                 ]};
             {custom, Custom} ->
                 {map, Anno, [
@@ -220,14 +225,37 @@ process_receive(Anno, Kind, Receive, Message) ->
                 ]}
         end,
 
+    {block, Anno, [
+        {match, Anno, {tuple, Anno, [{atom, Anno, ok}, TimeoutVar]}, TimeoutExpr},
+        case Kind of
+            assert ->
+                {bound, Bound} = lists:keyfind(bound, 1, Attrs),
+                BoundVars = [{var, Anno, Name} || Name <- Bound],
+                TmpVars = [gen_var(Anno, tmp) || _ <- Bound],
+                Subs = maps:from_list(lists:zip(Bound, TmpVars)),
+                Pattern = rewrite_vars(Pattern0, Subs),
+                Guards = rewrite_vars(Guards0, Subs),
 
+                NewClause = {clause, Anno, [Pattern], Guards, [{tuple, Anno, TmpVars}]},
+                After = ?call(Anno, ?MODULE, assert, [{atom, Anno, false}, ErrorInfo]),
+
+                % TODO: make whole expression evaluate to received message
+                {match, Anno, {tuple, Anno, BoundVars},
+                    {'receive', Anno, [NewClause], TimeoutVar, [After]}};
+            refute ->
+                NewClause = {clause, Anno, [erl_syntax:revert(Pattern0)], revert(Guards0), [
+                    ?call(Anno, ?MODULE, refute, [{atom, Anno, true}, ErrorInfo])
+                ]},
+                {'receive', Anno, [NewClause], TimeoutVar, [{atom, Anno, false}]}
+        end
+    ]}.
 
 process_operator(Anno, Kind, Op, OpAnno, LeftExpr, RightExpr, Expr) ->
     Left = gen_var(Anno, left),
     Right = gen_var(Anno, right),
     Call = {op, OpAnno, Op, Left, Right},
     Message = message(Kind, Expr),
-    ExprString = ?string(Anno, print_code(Kind, Expr)),
+    ExprString = ?string(Anno, print_assert(Kind, Expr)),
 
     ErrorInfo = {map, Anno, [
         ?key(Anno, left, Left),
@@ -263,29 +291,45 @@ process_operator(Anno, Kind, Op, OpAnno, LeftExpr, RightExpr, Expr) ->
 
 message(assert, {op, _, Op, _, _}) -> ["Assertion with ", atom_to_list(Op), " failed"];
 message(refute, {op, _, Op, _, _}) -> ["Refute with ", atom_to_list(Op), " failed"];
+message(assert, 'receive') -> "Assertion failed, no matching message received";
+message(refute, 'receive') -> "Refute failed, unexpectedly received a matching message";
 message(assert, match) -> "Match failed";
 message(refute, match) -> "Match succeeded, but should have failed";
 message(assert, _Expr) -> "Assertion failed";
 message(refute, _Expr) -> "Refute failed".
 
-receive_default_timeout(Receive) ->
-    case erl_syntax:receive_expr_timeout(Receive) of
-        none -> erl_syntax:abstract(application:get_env(better_assert, default_timeout));
-        Other -> Other
-    end.
+receive_default_timeout(Anno, none) ->
+    % TODO: for CT scale the timeout with the CT scale setting
+    Args = [{atom, Anno, better_assert}, {atom, Anno, receive_timeout}],
+    ?call(Anno, application, get_env, Args);
+receive_default_timeout(Anno, Expr) ->
+    {tuple, Anno, [{atom, Anno, ok}, Expr]}.
 
 include_equality_check(assert, Op) ->
     lists:member(Op, ['>', '>', '=/=', '/=']);
 include_equality_check(refute, Op) ->
     lists:member(Op, ['=<', '>=', '=:=', '==']).
 
-print_code(Kind, Expr) ->
+print_assert(Kind, Expr) ->
     ["?", atom_to_list(Kind), "(", erl_prettypr:format(Expr) ,")"].
 
 print_match(Kind, Expr, Pattern, none) ->
     ["?", atom_to_list(Kind), "Match(", erl_prettypr:format(Pattern), " = ", erl_prettypr:format(Expr), ")"];
 print_match(Kind, Expr, Pattern, Guards) ->
     ["?", atom_to_list(Kind), "Match(", erl_prettypr:format(Pattern), " when ", erl_prettypr:format(Guards), ", ", erl_prettypr:format(Expr), ")"].
+
+print_receive(Kind, Pattern, none, none) ->
+    ["?", atom_to_list(Kind), "Receive(", erl_prettypr:format(Pattern), ")"];
+print_receive(Kind, Pattern, Guards, none) ->
+    ["?", atom_to_list(Kind), "Receive(", erl_prettypr:format(Pattern), " when ", erl_prettypr:format(Guards), ")"];
+print_receive(Kind, Pattern, none, {integer, _, 0}) ->
+    ["?", atom_to_list(Kind), "Received(", erl_prettypr:format(Pattern), ")"];
+print_receive(Kind, Pattern, Guards, {integer, _, 0}) ->
+    ["?", atom_to_list(Kind), "Received(", erl_prettypr:format(Pattern), " when ", erl_prettypr:format(Guards), ")"];
+print_receive(Kind, Pattern, none, Timeout) ->
+    ["?", atom_to_list(Kind), "Received(", erl_prettypr:format(Pattern), ", ", erl_prettypr:format(Timeout), ")"];
+print_receive(Kind, Pattern, Guards, Timeout) ->
+    ["?", atom_to_list(Kind), "Received(", erl_prettypr:format(Pattern), " when ", erl_prettypr:format(Guards), ", ", erl_prettypr:format(Timeout), ")"].
 
 gen_var(Anno, Name) ->
     Num = get(gen_sym),
