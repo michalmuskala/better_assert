@@ -12,8 +12,7 @@
 -define(refuteMatch(Expr), better_assert:'$marker_match'(refute, Expr)).
 
 -define(assertMatch(Pattern, Value),
-    better_assert:'$marker_match'(
-        assert,
+    better_assert:'$marker_assert_match'(
         case (Value) of
             Pattern -> true
         end
@@ -21,8 +20,7 @@
 ).
 
 -define(assertMatch(Pattern, Value, Message),
-    better_assert:'$marker_match'(
-        assert,
+    better_assert:'$marker_assert_match'(
         Message,
         case (Value) of
             Pattern -> true
@@ -32,8 +30,7 @@
 
 
 -define(refuteMatch(Pattern, Value),
-    better_assert:'$marker_match'(
-        refute,
+    better_assert:'$marker_refute_match'(
         case (Value) of
             Guard -> false
         end
@@ -41,8 +38,7 @@
 ).
 
 -define(refuteMatch(Pattern, Value, Message),
-    better_assert:'$marker_match'(
-        refute,
+    better_assert:'$marker_refute_match'(
         Message
         case (Value) of
             Guard -> false
